@@ -285,19 +285,43 @@ cp .env.example .env
 # Thay LANGCHAIN_API_KEY với key của bạn
 ```
 
-### 4. Deploy Prefect Flows
+> **Fallback mode:** nếu chưa có Kaggle tunnel, platform vẫn chạy được end-to-end.
+> API Gateway trả về cached/fallback answer (flag `degraded: true`), và script embed
+> dùng local pseudo-embedding. Khi có URL thật trong `.env`, chạy
+> `docker compose up -d api-gateway` để gateway nhận config mới.
+
+Cài dependencies cho scripts và tests trên máy host:
 
 ```bash
-cd prefect/flows
 pip install -r requirements.txt
-python kafka_to_delta.py
+```
+
+### 4. Deploy Prefect Flows
+
+Flow `kafka-to-delta` được **tự động deploy + serve** (schedule 5 phút/lần) bởi
+service `prefect-flow-serve` trong docker-compose — không cần thao tác thêm.
+Kiểm tra tại Prefect UI: http://localhost:4200/deployments
+
+Chạy flow thủ công khi cần:
+
+```bash
+# Trigger 1 run ngay qua deployment:
+docker compose exec prefect-flow-serve prefect deployment run 'Kafka to Delta Pipeline/kafka-to-delta'
+
+# HOẶC chạy trực tiếp 1 lần (không qua scheduler):
+docker compose exec prefect-flow-serve python /opt/prefect/flows/kafka_to_delta.py run
+
+# HOẶC từ máy host (cần Python 3.10-3.12 + pip install -r prefect/flows/requirements.txt):
+cd prefect/flows && python kafka_to_delta.py run
 ```
 
 ### 5. Ingest Data vào Kafka
 
 ```bash
 cd ../..
-python scripts/01_ingest_to_kafka.py
+python scripts/01_ingest_to_kafka.py     # Integration 1: Data → Kafka
+python scripts/05_embed_to_qdrant.py     # Integration 5: Embeddings → Qdrant
+python scripts/03_delta_to_feast.py      # Integration 3+4: Delta → Feast (chạy sau khi flow đã consume)
 ```
 
 ### 6. Chạy Smoke Tests
@@ -345,9 +369,21 @@ curl -X POST http://localhost:8000/api/v1/chat \
 
 ## Monitoring
 
-- **Grafana Dashboard:** http://localhost:3000
+- **Grafana Dashboard:** http://localhost:3000 (admin/admin) — dashboard "Lab28 — AI Platform API Gateway" được auto-provision với 4 panels: request rate, P95 latency, error rate, service up
 - **Prometheus:** http://localhost:9090
 - **Prefect UI:** http://localhost:4200
+- **LangSmith traces:** https://smith.langchain.com — project `lab28-platform` (cần `LANGCHAIN_API_KEY` trong `.env`)
+
+Tạo traffic để dashboard có data:
+
+```bash
+for i in $(seq 1 20); do
+  curl -s -X POST http://localhost:8000/api/v1/chat \
+    -H "Content-Type: application/json" \
+    -d "{\"query\": \"load test $i\", \"embedding\": [0.1]}" > /dev/null &
+done
+wait
+```
 
 ## Troubleshooting
 
@@ -361,8 +397,9 @@ docker compose up -d
 **Prefect worker không connect:**
 ```bash
 # Check Prefect UI: http://localhost:4200
-# Đảm bảo worker đang chạy:
+# Đảm bảo worker và flow-serve đang chạy:
 docker compose logs prefect-worker
+docker compose logs prefect-flow-serve
 ```
 
 **Kafka consumer lag:**
@@ -371,6 +408,18 @@ docker compose logs prefect-worker
 docker exec lab28-kafka-1 kafka-topics --list --bootstrap-server localhost:9092
 ```
 
+## Graceful Degradation Demo
+
+```bash
+# Kill Qdrant → gateway vẫn trả lời (không có RAG context)
+docker compose stop qdrant
+curl -X POST http://localhost:8000/api/v1/chat \
+  -H "Content-Type: application/json" \
+  -d '{"query": "test degradation", "embedding": [0.1]}'
+docker compose start qdrant
+```
+
 ## Nộp Bài
 
-Xem `SUBMISSION.md` ở thư mục gốc project.
+- Xem `SUBMISSION.md` ở thư mục gốc project.
+- Trả lời 5 câu hỏi nộp bài: xem `ANSWERS.md`.

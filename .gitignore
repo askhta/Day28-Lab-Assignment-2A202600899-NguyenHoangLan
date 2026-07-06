@@ -219,4 +219,5 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-ANSWERS.md
+# Lab28 generated data
+delta-lake/

@@ -1,0 +1,11 @@
+# Dependencies để chạy scripts/ và smoke-tests/ từ máy host
+# (kafka-python >=2.2 để tương thích Python 3.12+)
+kafka-python>=2.2
+redis>=5.0
+requests>=2.31
+pandas>=2.1
+pyarrow>=14.0
+qdrant-client>=1.7
+pytest>=7.4
+python-dotenv>=1.0
+langsmith>=0.1

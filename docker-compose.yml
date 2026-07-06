@@ -1,5 +1,5 @@
 # docker-compose.yml
-version: "3.9"
+name: lab28
 
 services:
   # ── Kafka Stack ──────────────────────────────────────────
@@ -18,7 +18,13 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      # Dual listeners: PLAINTEXT cho các container trong network (kafka:29092),
+      # PLAINTEXT_HOST cho client chạy trên máy host (localhost:9092)
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
 
   # ── Prefect ───────────────────────────────────────────────
@@ -32,15 +38,40 @@ services:
 
   prefect-worker:
     image: prefecthq/prefect:2.14.0-python3.10
+    restart: unless-stopped
+    # Chờ Orion API sẵn sàng rồi mới tạo work pool + start worker
     command: >
-      sh -c "prefect work-pool create --type process lab28-worker 2>/dev/null || true
+      sh -c "until python -c 'import httpx; httpx.get(\"http://prefect-orion:4200/api/health\").raise_for_status()' 2>/dev/null;
+      do echo 'waiting for prefect-orion...'; sleep 3; done
+      && (prefect work-pool create --type process lab28-worker || true)
       && prefect worker start -p lab28-worker -n lab28-worker"
     environment:
       PREFECT_API_URL: http://prefect-orion:4200/api
+      KAFKA_BOOTSTRAP: kafka:29092
+      DELTA_PATH: /opt/delta-lake/raw
     volumes:
       - ./prefect/flows:/opt/prefect/flows
       - ./delta-lake:/opt/delta-lake
       - /var/run/docker.sock:/var/run/docker.sock
+    depends_on: [prefect-orion, kafka]
+
+  # Serve flow kafka_to_delta: đăng ký deployment với schedule 5 phút/lần
+  # và tự chạy các scheduled runs (không cần thao tác thủ công sau compose up)
+  prefect-flow-serve:
+    image: prefecthq/prefect:2.14.0-python3.10
+    restart: unless-stopped
+    command: >
+      sh -c "pip install -q kafka-python pandas pyarrow
+      && until python -c 'import httpx; httpx.get(\"http://prefect-orion:4200/api/health\").raise_for_status()' 2>/dev/null;
+      do echo 'waiting for prefect-orion...'; sleep 3; done
+      && python /opt/prefect/flows/kafka_to_delta.py"
+    environment:
+      PREFECT_API_URL: http://prefect-orion:4200/api
+      KAFKA_BOOTSTRAP: kafka:29092
+      DELTA_PATH: /opt/delta-lake/raw
+    volumes:
+      - ./prefect/flows:/opt/prefect/flows
+      - ./delta-lake:/opt/delta-lake
     depends_on: [prefect-orion, kafka]
 
   # ── Vector Store (Qdrant) ─────────────────────────────────
@@ -72,6 +103,9 @@ services:
       - "3000:3000"
     environment:
       GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
 
   # ── API Gateway ───────────────────────────────────────────
   api-gateway:
@@ -79,9 +113,12 @@ services:
     ports:
       - "8000:8000"
     environment:
-      VLLM_URL: ${VLLM_NGROK_URL}
+      VLLM_URL: ${VLLM_NGROK_URL:-}
+      EMBED_URL: ${EMBED_NGROK_URL:-}
       QDRANT_URL: http://qdrant:6333
       REDIS_URL: redis://redis:6379
+      LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-lab28-platform}
     depends_on: [qdrant, redis]
 
 volumes:
